@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mded</title>
+<style>
+  /* Editor chrome inside the article. The site stylesheet is injected after
+     this, so everything here is specific enough to survive it. */
+  #mded-doc .mded-block { position: relative; border-radius: 3px; cursor: text; min-height: 1em; }
+  #mded-hover {
+    position: absolute; pointer-events: none; display: none; z-index: 2147483646;
+    border: 1px dashed rgba(128,128,128,.35); border-radius: 3px;
+  }
+  #mded-doc .mded-block.editing { outline: 1px solid rgba(80,140,255,.6); outline-offset: 4px; }
+  #mded-doc .mded-block.pending { opacity: .55; }
+  #mded-doc .mded-ghost { font-family: ui-monospace, monospace; font-size: .8em; opacity: .45; white-space: pre-wrap; margin: .5em 0; }
+  #mded-doc textarea.mded-src {
+    display: block; box-sizing: border-box; width: 100%; margin: .5em 0; padding: 6px 8px;
+    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: inherit; background: rgba(128,128,128,.12); border: none; outline: none;
+    resize: none; overflow: hidden; white-space: pre-wrap; tab-size: 4;
+  }
+  #mded-doc .mded-conflict { margin: 1em 0; padding: 6px 10px 10px; border: 1px solid #e5a33a; border-radius: 4px; }
+  #mded-doc .mded-conflict-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font: 13px/1.4 system-ui, sans-serif; }
+  #mded-doc .mded-conflict-bar span { margin-right: auto; color: #e5a33a; }
+  #mded-doc .mded-conflict-bar button { font: 12px system-ui, sans-serif; padding: 2px 8px; cursor: pointer; color: #ddd; background: #2b2e34; border: 1px solid #555; border-radius: 4px; }
+  #mded-doc .mded-side { margin-top: 8px; padding-left: 10px; border-left: 3px solid #555; }
+  #mded-doc .mded-side-label { font: 11px system-ui, sans-serif; opacity: .6; text-transform: uppercase; letter-spacing: .05em; }
+  #mded-doc .mded-add { min-height: 6em; cursor: text; opacity: 0; font-family: ui-monospace, monospace; font-size: .8em; padding-top: 1em; }
+  #mded-doc .mded-add:hover { opacity: .45; }
+  #mded-raw {
+    display: none; box-sizing: border-box; width: 100%; min-height: 80vh; padding: 10px;
+    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: inherit; background: rgba(128,128,128,.12); border: none; outline: none; resize: vertical;
+  }
+  body.mded-rawmode #mded-raw { display: block; }
+  body.mded-rawmode #mded-doc { display: none; }
+  #mded-spacer { height: 34px; }
+</style>
+</head>
+<body>
+<div id="mded-bar"></div>
+<div id="mded-spacer"></div>
+<div id="mded-doc"></div>
+<div id="mded-hover"></div>
+<textarea id="mded-raw" spellcheck="true"></textarea>
+
+<script>
+"use strict";
+
+// ---------- toolbar (shadow DOM so the site CSS can't touch it) ----------
+
+const host = document.getElementById("mded-bar");
+const shadow = host.attachShadow({ mode: "open" });
+shadow.innerHTML = `
+<style>
+  :host { all: initial; }
+  .bar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 2147483647; height: 30px;
+    display: flex; align-items: center; gap: 6px; padding: 0 8px;
+    font: 13px/1 system-ui, sans-serif; color: #ddd; background: #1d1f23; border-bottom: 1px solid #333;
+  }
+  select, button { font: inherit; color: #ddd; background: #2b2e34; border: 1px solid #444; border-radius: 4px; height: 22px; padding: 0 8px; cursor: pointer; }
+  select { max-width: 40vw; }
+  button:hover, select:hover { background: #363a41; }
+  button.on { background: #3a5a8c; border-color: #4f78b8; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: transparent; flex: none; }
+  .dot.dirty { background: #e5a33a; }
+  .status { margin-left: auto; opacity: .75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  .status.err { color: #ff7b72; opacity: 1; }
+  .status.ok { color: #7ee787; opacity: 1; }
+  .out {
+    display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 2147483647; max-height: 40vh; overflow: auto;
+    margin: 0; padding: 8px 10px; font: 12px/1.4 ui-monospace, monospace; color: #ddd; background: #16181bf2; border-top: 1px solid #333; white-space: pre-wrap;
+  }
+  .out.show { display: block; }
+  .help { opacity: .5; white-space: nowrap; }
+  @media (max-width: 700px) { .help { display: none; } }
+</style>
+<div class="bar">
+  <span class="dot" id="dot" title="unsaved changes"></span>
+  <select id="file" title="file"></select>
+  <button id="new" title="new .md file">New</button>
+  <button id="save" title="Ctrl+S">Save</button>
+  <button id="build" title="save, then run the build command (Ctrl+B)">Build</button>
+  <button id="view" title="open the built html (Ctrl+Shift+V)">View</button>
+  <button id="raw" title="edit the whole file as markdown (Ctrl+E)">Source</button>
+  <button id="auto" title="save automatically after each edit">Autosave</button>
+  <span class="help">click to edit · Esc done · Ctrl+Enter new block · ↑↓ across blocks</span>
+  <span class="status" id="status" title="click to toggle build output"></span>
+</div>
+<pre class="out" id="out"></pre>`;
+const $ = (id) => shadow.getElementById(id);
+
+// ---------- state ----------
+
+let cfg = null;
+let name = null;     // current file name
+let mtime = null;    // mtime_ns from the server at last load/save
+let doc = null;      // { blocks: [{pre: [lines], lines: [lines], html}], tail: [lines] }
+let savedText = "";
+let undoStack = [], redoStack = [];
+let editing = -1;    // index of the block being edited, or -1
+let lastSent = null; // text of the save in flight / last sent, to recognize our own writes
+let watcher = null;  // EventSource for disk changes to the open file
+let autoTimer = null;
+let autosave = true;
+try { autosave = localStorage.getItem("mded-autosave") !== "0"; } catch {}
+const docEl = document.getElementById("mded-doc");
+const rawEl = document.getElementById("mded-raw");
+
+// ---------- markdown block splitting (lossless: serialize(parse(t)) === t) ----------
+
+const BLANK = /^\s*$/;
+const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
+const LIST = /^\s{0,3}([-*+]|\d+[.)])\s/;
+
+// Pandoc fenced divs: "::: {.cls}" / "::: cls" opens, a bare ":::" closes.
+const DIV_OPEN = /^:{3,}\s*[^:\s]/;
+const DIV_CLOSE = /^:{3,}\s*$/;
+
+// Code-fence state after `line`: the open fence marker, or null.
+function nextFence(fence, line) {
+  if (fence) return line.trim().startsWith(fence) && line.trim().replace(/[`~]/g, "") === "" ? null : fence;
+  const m = FENCE.exec(line);
+  return m ? m[1] : null;
+}
+
+// How much `line` opens (+) or closes (-) containers: ::: fenced divs and raw <div> tags.
+function depthDelta(line) {
+  if (DIV_OPEN.test(line)) return 1;
+  if (DIV_CLOSE.test(line)) return -1;
+  return (line.match(/<div\b/gi) || []).length - (line.match(/<\/div\s*>/gi) || []).length;
+}
+
+// If line i opens a container that closes later, the index just past the
+// close, else -1. Lines inside code fences don't count.
+function containerEnd(L, i) {
+  if (depthDelta(L[i]) <= 0) return -1;
+  let depth = 0, fence = null;
+  for (let j = i; j < L.length; j++) {
+    const was = fence;
+    fence = nextFence(fence, L[j]);
+    if (was || fence) continue;
+    depth += depthDelta(L[j]);
+    if (depth <= 0) return j + 1;
+  }
+  return -1;
+}
+
+function parse(text) {
+  const L = text.split("\n");
+  const blocks = [];
+  let i = 0;
+  while (i < L.length) {
+    const pre = [];
+    while (i < L.length && BLANK.test(L[i])) pre.push(L[i++]);
+    if (i >= L.length) return { blocks, tail: pre };
+    const start = i;
+
+    // A container (::: div or raw <div>) that closes later swallows everything
+    // up to its close, so pandoc renders the markdown inside it.
+    const end = containerEnd(L, i);
+    if (end > 0) {
+      i = end;
+    } else {
+      const isList = LIST.test(L[i]);
+      let fence = null;
+      while (i < L.length) {
+        if (!fence && BLANK.test(L[i])) {
+          let j = i;
+          while (j < L.length && BLANK.test(L[j])) j++;
+          const next = L[j];
+          const continues = next !== undefined && isList && (/^(\s{2,}|\t)/.test(next) || LIST.test(next));
+          if (!continues) break;
+          i = j; continue;
+        }
+        fence = nextFence(fence, L[i++]);
+      }
+    }
+    blocks.push({ pre, lines: L.slice(start, i), html: null });
+  }
+  return { blocks, tail: [] };
+}
+
+// A conflict block ({conflict, mine, theirs}) serializes as "mine" until resolved.
+function serialize(d) {
+  const out = [];
+  for (const b of d.blocks) for (const x of b.conflict ? b.mine : [b]) out.push(...x.pre, ...x.lines);
+  out.push(...d.tail);
+  return out.join("\n");
+}
+
+const src = (b) => b.lines.join("\n");
+const leaves = (bs) => bs.flatMap((b) => b.conflict ? [...b.mine, ...b.theirs] : [b]);
+const hasConflicts = () => doc.blocks.some((b) => b.conflict);
+const isRaw = () => document.body.classList.contains("mded-rawmode");
+const editorTA = () => editing >= 0 ? docEl.querySelector("textarea.mded-src") : null;
+const blockIndex = (el) => [...docEl.children].indexOf(el);
+
+// ---------- server ----------
+
+async function api(path, body) {
+  const opts = body === undefined ? {} :
+    { method: "POST", headers: { "Content-Type": "application/json", "X-Mded": "1" }, body: JSON.stringify(body) };
+  const r = await fetch(path, opts);
+  const data = await r.json();
+  if (!r.ok) { const e = new Error(data.error || r.statusText); e.status = r.status; throw e; }
+  return data;
+}
+
+async function renderBlocks(bs) {
+  const todo = leaves(bs).filter((b) => b.html === null);
+  if (!todo.length) return;
+  const { html } = await api("/api/render", { blocks: todo.map(src) });
+  todo.forEach((b, k) => { b.html = html[k]; });
+}
+
+// ---------- view ----------
+
+function hasVisible(el) {
+  return el.textContent.trim() !== "" || el.querySelector("img,hr,video,iframe,svg,table,canvas");
+}
+
+// Fill el with b's rendered html (or its source, greyed, while pending or
+// when it renders to nothing visible). Returns true if still pending.
+function fillLeaf(el, b) {
+  const ghost = () => {
+    el.innerHTML = `<div class="mded-ghost"></div>`;
+    el.firstChild.textContent = src(b);
+  };
+  if (b.html === null) { ghost(); return true; }
+  el.innerHTML = b.html;
+  if (!hasVisible(el)) ghost();
+  return false;
+}
+
+function blockEl(b) {
+  const el = document.createElement("div");
+  if (b.conflict) return conflictEl(b, el);
+  el.className = "mded-block";
+  if (fillLeaf(el, b)) el.classList.add("pending");
+  return el;
+}
+
+function conflictEl(b, el) {
+  el.className = "mded-conflict";
+  el.innerHTML = `<div class="mded-conflict-bar"><span>Changed here and on disk</span>
+    <button data-pick="mine">Keep yours</button><button data-pick="theirs">Keep disk</button><button data-pick="both">Keep both</button></div>`;
+  let pending = false;
+  for (const [label, bs] of [["yours", b.mine], ["on disk", b.theirs]]) {
+    const side = document.createElement("div");
+    side.className = "mded-side";
+    side.innerHTML = `<div class="mded-side-label"></div>`;
+    side.firstChild.textContent = label + (bs.length ? "" : " (deleted)");
+    for (const x of bs) {
+      const leaf = document.createElement("div");
+      pending = fillLeaf(leaf, x) || pending;
+      side.append(leaf);
+    }
+    el.append(side);
+  }
+  if (pending) el.classList.add("pending");
+  return el;
+}
+
+function resolveConflict(el, pick) {
+  if (editing >= 0) commit();
+  const i = blockIndex(el), c = doc.blocks[i];
+  pushHistory();
+  spliceBlocks(i, 1, ...(pick === "mine" ? c.mine : pick === "theirs" ? c.theirs : [...c.mine, ...c.theirs]));
+  renderAndRedraw();
+  updateDirty();
+  if (!hasConflicts()) { setStatus("conflicts resolved", "ok"); scheduleAutosave(); }
+}
+
+// Rebuild the whole view (and the source textarea, in source mode).
+function draw() {
+  editing = -1;
+  docEl.replaceChildren(...doc.blocks.map(blockEl));
+  const add = document.createElement("div");
+  add.className = "mded-add";
+  add.textContent = "+ click to add a block";
+  docEl.append(add);
+  if (isRaw()) rawEl.value = serialize(doc);
+}
+
+function redrawBlock(i) {
+  const old = docEl.children[i];
+  if (old) old.replaceWith(blockEl(doc.blocks[i]));
+}
+
+// Replace doc.blocks[i, i+del) with items, touching only those elements.
+function spliceBlocks(i, del, ...items) {
+  doc.blocks.splice(i, del, ...items);
+  const gone = [...docEl.children].slice(i, i + del);
+  docEl.children[i].before(...items.map(blockEl)); // the "add" element is always last
+  gone.forEach((e) => e.remove());
+}
+
+// doc.blocks with the open block's textarea text in place of its committed text.
+function liveBlocks() {
+  const ta = editorTA();
+  if (!ta) return doc.blocks;
+  return doc.blocks.map((b, i) => i === editing ? { pre: b.pre, lines: ta.value.split("\n"), html: null } : b);
+}
+
+// Carry rendered html over from the current document to blocks with the same source.
+function reuseHtml(bs) {
+  const cache = new Map(leaves(doc.blocks).map((b) => [src(b), b.html]));
+  for (const b of leaves(bs)) if (b.html === null) b.html = cache.get(src(b)) ?? null;
+}
+
+function setStatus(msg, kind = "") {
+  const s = $("status");
+  s.textContent = msg;
+  s.className = "status " + kind;
+}
+
+function updateDirty() {
+  const dirty = currentText() !== savedText;
+  $("dot").classList.toggle("dirty", dirty);
+  document.title = (dirty ? "• " : "") + (name || "mded");
+  return dirty;
+}
+
+function currentText() {
+  return isRaw() ? rawEl.value : serialize({ blocks: liveBlocks(), tail: doc.tail });
+}
+
+// ---------- editing ----------
+
+function autosize(ta) {
+  ta.style.height = "auto";
+  ta.style.height = ta.scrollHeight + "px";
+}
+
+function edit(i, caret = "end") {
+  if (editing >= 0) {
+    const was = editing, n = commit();
+    if (i > was) i += n - 1;
+  }
+  if (i < 0 || i >= doc.blocks.length || doc.blocks[i].conflict) return;
+  editing = i;
+  const el = docEl.children[i];
+  const ta = document.createElement("textarea");
+  ta.className = "mded-src";
+  ta.spellcheck = true;
+  ta.value = src(doc.blocks[i]);
+  el.classList.add("editing");
+  el.replaceChildren(ta);
+  autosize(ta);
+  ta.focus();
+  const pos = caret === "start" ? 0 : ta.value.length;
+  ta.setSelectionRange(pos, pos);
+  drawHover();
+  ta.addEventListener("input", () => { autosize(ta); updateDirty(); });
+  ta.addEventListener("keydown", onKey);
+  // Switching windows also blurs; keep editing in that case.
+  ta.addEventListener("blur", () => { if (editing === i && ta.isConnected && document.hasFocus()) commit(); });
+}
+
+// Fold the textarea back into the document, re-splitting it into blocks.
+// Returns the number of blocks it became.
+function commit() {
+  const i = editing;
+  if (i < 0) return 1;
+  const ta = editorTA();
+  editing = -1;
+  const old = doc.blocks[i];
+  const text = ta ? ta.value : src(old);
+  const empty = BLANK.test(text);
+  if (!empty && text === src(old)) { redrawBlock(i); return 1; }
+
+  pushHistory();
+  let repl;
+  if (empty) {
+    repl = [];
+  } else {
+    const sub = parse(text);
+    repl = sub.blocks;
+    // Blank lines typed at the end of the block (sub.tail) are dropped;
+    // the next block keeps its own gap.
+    if (repl.length) repl[0].pre = old.pre.concat(repl[0].pre);
+  }
+  spliceBlocks(i, 1, ...repl);
+  renderAndRedraw();
+  updateDirty();
+  scheduleAutosave();
+  return repl.length;
+}
+
+let renderSeq = 0;
+async function renderAndRedraw() {
+  const seq = ++renderSeq;
+  try {
+    await renderBlocks(doc.blocks);
+  } catch (e) { setStatus("render failed: " + e.message, "err"); return; }
+  if (seq !== renderSeq) return;
+  doc.blocks.forEach((b, i) => {
+    const el = docEl.children[i];
+    if (i !== editing && el && el.classList.contains("pending")) redrawBlock(i);
+  });
+}
+
+function insertBlock(at) {
+  if (editing >= 0) { const n = commit(); if (at > editing) at += n - 1; }
+  pushHistory();
+  const b = { pre: at === 0 && doc.blocks.length === 0 ? [] : [""], lines: [""], html: null };
+  if (at === 0 && doc.blocks.length) { b.pre = doc.blocks[0].pre; doc.blocks[0].pre = [""]; }
+  spliceBlocks(at, 0, b);
+  edit(at);
+}
+
+function onKey(e) {
+  const ta = e.target;
+  const i = editing;
+  const before = ta.value.slice(0, ta.selectionStart);
+  const after = ta.value.slice(ta.selectionEnd);
+  if (e.key === "Escape") {
+    e.preventDefault(); ta.blur();
+  } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    const n = commit();
+    insertBlock(i + n);
+  } else if (e.key === "ArrowUp" && !e.shiftKey && !before.includes("\n") && i > 0) {
+    e.preventDefault();
+    commit();
+    edit(i - 1);
+  } else if (e.key === "ArrowDown" && !e.shiftKey && !after.includes("\n") && ta.selectionStart === ta.selectionEnd) {
+    e.preventDefault();
+    const n = commit();
+    if (i + n < doc.blocks.length) edit(i + n, "start");
+  } else if (e.key === "Backspace" && ta.value === "") {
+    e.preventDefault();
+    commit();
+    if (i > 0) edit(i - 1);
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    document.execCommand("insertText", false, e.shiftKey ? "" : "    ");
+  }
+}
+
+// Hover outline. Drawn as an overlay around where the block's content
+// actually renders, since content (e.g. a full-width div) can break out of
+// the block's own box.
+const hoverEl = document.getElementById("mded-hover");
+let hovered = null;
+
+function contentRect(el) {
+  const kids = [...el.children];
+  const rects = (kids.length ? kids : [el]).map((k) => k.getBoundingClientRect()).filter((r) => r.width || r.height);
+  if (!rects.length) return el.getBoundingClientRect();
+  return {
+    left: Math.min(...rects.map((r) => r.left)), right: Math.max(...rects.map((r) => r.right)),
+    top: Math.min(...rects.map((r) => r.top)), bottom: Math.max(...rects.map((r) => r.bottom)),
+  };
+}
+
+function drawHover() {
+  if (!hovered || !hovered.isConnected || hovered.classList.contains("editing")) {
+    hoverEl.style.display = "none";
+    return;
+  }
+  const r = contentRect(hovered), pad = 4;
+  Object.assign(hoverEl.style, {
+    display: "block",
+    left: r.left + scrollX - pad + "px", top: r.top + scrollY - pad + "px",
+    width: r.right - r.left + 2 * pad + "px", height: r.bottom - r.top + 2 * pad + "px",
+  });
+}
+
+let hoverFrame = 0;
+docEl.addEventListener("mousemove", (e) => {
+  hovered = e.target.closest(".mded-block");
+  hoverFrame ||= requestAnimationFrame(() => { hoverFrame = 0; drawHover(); });
+});
+docEl.addEventListener("mouseleave", () => { hovered = null; drawHover(); });
+window.addEventListener("resize", drawHover);
+
+docEl.addEventListener("mousedown", (e) => {
+  const a = e.target.closest("a");
+  if (a && (e.ctrlKey || e.metaKey)) return; // ctrl-click follows links
+  const blk = e.target.closest(".mded-block");
+  if (e.target.closest("textarea")) return;
+  const pick = e.target.closest(".mded-conflict button");
+  if (pick) {
+    e.preventDefault();
+    resolveConflict(pick.closest(".mded-conflict"), pick.dataset.pick);
+    return;
+  }
+  if (e.target.closest(".mded-conflict")) return;
+  if (blk) {
+    e.preventDefault();
+    const i = blockIndex(blk);
+    if (i !== editing) edit(i);
+  } else if (e.target.closest(".mded-add")) {
+    e.preventDefault();
+    insertBlock(doc.blocks.length);
+  }
+});
+docEl.addEventListener("click", (e) => {
+  const a = e.target.closest("a");
+  if (!a) return;
+  e.preventDefault();
+  if (e.ctrlKey || e.metaKey) window.open(a.href, "_blank");
+});
+
+// ---------- history (whole-document snapshots on each committed edit) ----------
+
+function pushHistory() {
+  undoStack.push(serialize(doc));
+  if (undoStack.length > 200) undoStack.shift();
+  redoStack = [];
+}
+
+async function restore(text) {
+  const next = parse(text);
+  reuseHtml(next.blocks);
+  doc = next;
+  draw();
+  updateDirty();
+  await renderAndRedraw();
+}
+
+function undo() { if (undoStack.length) { redoStack.push(serialize(doc)); restore(undoStack.pop()); scheduleAutosave(); } }
+function redo() { if (redoStack.length) { undoStack.push(serialize(doc)); restore(redoStack.pop()); scheduleAutosave(); } }
+
+// ---------- files ----------
+
+function fillFiles(files) {
+  const sel = $("file");
+  sel.replaceChildren(...files.map((f) => new Option(f, f)));
+  if (name) sel.value = name;
+}
+
+async function open(n) {
+  const r = await api("/api/file?name=" + encodeURIComponent(n));
+  name = n; mtime = r.mtime; savedText = r.text;
+  undoStack = []; redoStack = [];
+  $("file").value = n;
+  const u = new URL(location.href);
+  u.searchParams.set("file", n);
+  history.replaceState(null, "", u);
+  doc = parse(r.text);
+  draw();
+  updateDirty();
+  setStatus(n);
+  watch();
+  await renderAndRedraw();
+}
+
+// auto: an autosave. It leaves the block being edited open (saving only
+// committed blocks) and gives up quietly on a disk conflict, since the
+// watcher is about to merge the disk version in.
+async function save({ force = false, auto = false } = {}) {
+  clearTimeout(autoTimer);
+  const raw = isRaw();
+  if (!auto) {
+    if (editing >= 0) commit();
+    if (raw) syncFromRaw();
+  }
+  if (hasConflicts()) { setStatus("resolve the conflicts with disk first", "err"); return false; }
+  const text = raw ? rawEl.value : serialize(doc);
+  if (text === savedText && !force) { if (!auto) setStatus("Saved " + name, "ok"); return true; }
+  lastSent = text;
+  try {
+    const r = await api("/api/save", { name, text, mtime, force });
+    mtime = r.mtime; savedText = text;
+    fillFiles(r.files);
+    updateDirty();
+    setStatus((auto ? "Autosaved " : "Saved ") + name, "ok");
+    return true;
+  } catch (e) {
+    if (e.status === 409 && auto) return false;
+    if (e.status === 409 && !force && confirm(name + " changed on disk since it was loaded. Overwrite it?")) return save({ force: true });
+    setStatus("save failed: " + e.message, "err");
+    return false;
+  }
+}
+
+function scheduleAutosave() {
+  if (!autosave) return;
+  clearTimeout(autoTimer);
+  autoTimer = setTimeout(() => save({ auto: true }), 800);
+}
+
+function setAutosave(on) {
+  autosave = on;
+  try { localStorage.setItem("mded-autosave", on ? "1" : "0"); } catch {}
+  $("auto").classList.toggle("on", on);
+  if (on) scheduleAutosave(); else clearTimeout(autoTimer);
+}
+
+// ---------- live sync with disk ----------
+
+function watch() {
+  if (watcher) watcher.close();
+  const n = name;
+  watcher = new EventSource(`/api/watch?name=${encodeURIComponent(n)}&mtime=${mtime}`);
+  watcher.onmessage = (e) => { if (n === name) onDisk(JSON.parse(e.data)); };
+}
+
+function onDisk(msg) {
+  if (msg.deleted) { setStatus(name + " was deleted on disk", "err"); return; }
+  if (msg.mtime === mtime) return;
+  // Our own save (possibly before its response arrived), or a touch.
+  if (msg.text === lastSent || msg.text === savedText) {
+    mtime = msg.mtime;
+    savedText = msg.text;
+    updateDirty();
+    return;
+  }
+  const raw = isRaw(), pos = rawEl.selectionStart;
+  if (raw) syncFromRaw();
+  const conflicts = mergeDisk(msg.text); // its draw() also refreshes the source textarea
+  mtime = msg.mtime;
+  if (raw && conflicts) setRaw(false);
+  else if (raw) rawEl.setSelectionRange(pos, pos);
+  const dirty = updateDirty();
+  if (conflicts) setStatus(`${conflicts} conflict${conflicts > 1 ? "s" : ""} with disk: pick a version`, "err");
+  else setStatus(dirty ? "merged changes from disk" : "reloaded from disk", "ok");
+  if (dirty) scheduleAutosave();
+}
+
+// Three-way merge of the document (mine) with the new disk text (theirs),
+// using the last text we know was on disk (savedText) as the base. Works on
+// whole blocks. The block being edited counts with its textarea contents and
+// stays open unless the disk changed it too. Returns the number of conflicts.
+function mergeDisk(theirsText) {
+  const base = parse(savedText), theirs = parse(theirsText);
+  const ta = editorTA(), mine = liveBlocks();
+  const kept = ta && { orig: doc.blocks[editing], obj: mine[editing], value: ta.value, start: ta.selectionStart, end: ta.selectionEnd };
+  const key = (b) => b.pre.join("\n") + "\u0000" + b.lines.join("\n");
+  const merged = diff3(base.blocks, mine, theirs.blocks, key);
+  reuseHtml(merged);
+  const tail = base.tail.join("\n") === doc.tail.join("\n") ? theirs.tail : doc.tail;
+  if (serialize({ blocks: merged, tail }) !== serialize({ blocks: mine, tail: doc.tail })) pushHistory();
+
+  // While the textarea is open the document holds the block's committed text.
+  const at = kept ? merged.indexOf(kept.obj) : -1;
+  if (at >= 0) merged[at] = kept.orig;
+  doc = { blocks: merged, tail };
+  savedText = theirsText;
+  draw();
+  if (at >= 0) {
+    edit(at);
+    const t = editorTA();
+    t.value = kept.value;
+    autosize(t);
+    t.setSelectionRange(kept.start, kept.end);
+  }
+  renderAndRedraw();
+  return merged.filter((b) => b.conflict).length;
+}
+
+// Longest common subsequence of a and b by key: match[i] is the index in b
+// paired with a[i], or -1.
+function lcs(a, b, key) {
+  const n = a.length, m = b.length, ka = a.map(key), kb = b.map(key);
+  const L = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      L[i][j] = ka[i] === kb[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const match = new Array(n).fill(-1);
+  for (let i = 0, j = 0; i < n && j < m;) {
+    if (ka[i] === kb[j]) { match[i] = j; i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) i++;
+    else j++;
+  }
+  return match;
+}
+
+// Standard diff3 over block lists. Base blocks unchanged on both sides are
+// anchors; between anchors, a side that didn't change from base yields to the
+// one that did, and two different changes become a conflict block.
+function diff3(base, mine, theirs, key) {
+  const toMine = lcs(base, mine, key), toTheirs = lcs(base, theirs, key);
+  const same = (x, y) => x.length === y.length && x.every((b, k) => key(b) === key(y[k]));
+  const out = [];
+  let i = 0, m = 0, t = 0;
+  for (let k = 0; k <= base.length; k++) {
+    const end = k === base.length;
+    if (!end && (toMine[k] < 0 || toTheirs[k] < 0)) continue;
+    const mk = end ? mine.length : toMine[k], tk = end ? theirs.length : toTheirs[k];
+    const B = base.slice(i, k), M = mine.slice(m, mk), T = theirs.slice(t, tk);
+    if (same(M, B)) out.push(...T);
+    else if (same(T, B) || same(M, T)) out.push(...M);
+    else out.push({ conflict: true, mine: M, theirs: T });
+    if (!end) out.push(mine[mk]);
+    i = k + 1; m = mk + 1; t = tk + 1;
+  }
+  return out;
+}
+
+async function build() {
+  if (!cfg.build) { setStatus("no --build command configured", "err"); return; }
+  if (!(await save())) return;
+  setStatus("building…");
+  try {
+    const r = await api("/api/build", { name });
+    $("out").textContent = "$ " + r.cmd + "\n" + r.output + (r.code ? `\n[exit ${r.code}]` : "");
+    if (r.code) { $("out").classList.add("show"); setStatus(`build failed (exit ${r.code}), click for output`, "err"); }
+    else { setStatus("built " + name, "ok"); refreshView(); }
+  } catch (e) { setStatus("build failed: " + e.message, "err"); }
+}
+
+let viewWin = null;
+function viewURL() { return cfg.base + encodeURIComponent(name.replace(/\.md$/, ".html")); }
+function view() { viewWin = window.open(viewURL(), "mded-view"); }
+function refreshView() { if (viewWin && !viewWin.closed) viewWin.location.href = viewURL(); }
+
+async function newFile() {
+  let n = prompt("New file name (e.g. My_New_Post):");
+  if (!n) return;
+  n = n.trim().replace(/\s+/g, "_");
+  if (!n.endsWith(".md")) n += ".md";
+  if (!(await confirmDiscard())) return;
+  try {
+    const r = await api("/api/save", { name: n, text: "# " + n.slice(0, -3).replace(/_/g, " ") + "\n", create: true });
+    fillFiles(r.files);
+    await open(n);
+  } catch (e) { setStatus("create failed: " + e.message, "err"); }
+}
+
+async function confirmDiscard() {
+  if (!updateDirty()) return true;
+  if (autosave && !hasConflicts() && (await save())) return true;
+  return confirm("Discard unsaved changes to " + name + "?");
+}
+
+// ---------- raw source mode ----------
+
+function syncFromRaw() {
+  if (rawEl.value !== serialize(doc)) { pushHistory(); restore(rawEl.value); }
+}
+
+function setRaw(on) {
+  document.body.classList.toggle("mded-rawmode", on);
+  $("raw").classList.toggle("on", on);
+}
+
+function toggleRaw() {
+  if (editing >= 0) commit();
+  const on = !isRaw();
+  if (on && hasConflicts()) { setStatus("resolve the conflicts with disk first", "err"); return; }
+  if (on) {
+    rawEl.value = serialize(doc);
+    setRaw(true);
+    rawEl.focus();
+  } else {
+    syncFromRaw();
+    setRaw(false);
+  }
+}
+rawEl.addEventListener("input", () => { updateDirty(); scheduleAutosave(); });
+
+// ---------- wiring ----------
+
+$("file").addEventListener("change", async (e) => {
+  const n = e.target.value;
+  if (await confirmDiscard()) open(n); else e.target.value = name;
+});
+$("new").onclick = newFile;
+$("save").onclick = () => save();
+$("build").onclick = build;
+$("view").onclick = view;
+$("raw").onclick = toggleRaw;
+$("auto").onclick = () => setAutosave(!autosave);
+$("auto").classList.toggle("on", autosave);
+$("status").onclick = () => $("out").classList.toggle("show");
+
+document.addEventListener("keydown", (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (!mod) return;
+  const k = e.key.toLowerCase();
+  if (k === "s") { e.preventDefault(); save(); }
+  else if (k === "b") { e.preventDefault(); build(); }
+  else if (k === "e") { e.preventDefault(); toggleRaw(); }
+  else if (k === "v" && e.shiftKey) { e.preventDefault(); view(); }
+  else if ((k === "z" || k === "y") && editing < 0 && !isRaw()) {
+    e.preventDefault();
+    k === "y" || e.shiftKey ? redo() : undo();
+  }
+});
+
+window.addEventListener("beforeunload", (e) => { if (doc && updateDirty()) e.preventDefault(); });
+
+(async function init() {
+  cfg = await api("/api/config");
+  // Resolve images, fonts and links relative to the markdown directory.
+  const base = document.createElement("base");
+  base.href = cfg.base;
+  document.head.prepend(base);
+  document.head.insertAdjacentHTML("beforeend", cfg.style);
+  fillFiles(cfg.files);
+  const want = new URL(location.href).searchParams.get("file");
+  const first = cfg.files.includes(want) ? want : cfg.files[0];
+  if (first) await open(first);
+  else { doc = { blocks: [], tail: [] }; draw(); setStatus("no .md files in " + cfg.dir); }
+})().catch((e) => setStatus("error: " + e.message, "err"));
+</script>
+</body>
+</html>

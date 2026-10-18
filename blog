@@ -1,0 +1,5 @@
+#!/bin/sh
+# Edit ~/git/clean-site/blog with the site's styling; Build runs generate.py.
+exec python3 "$(dirname "$(readlink -f "$0")")/mded.py" ~/git/clean-site/blog \
+  --style ../resources/style/pandoc.html \
+  --build "python3 generate.py" "$@"
